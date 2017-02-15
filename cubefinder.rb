@@ -31,7 +31,7 @@ class RubikFinder
         lines = cv::Mat.new
 
         pi = 3.1415926
-        cv::HoughLines( edge, lines, 1, pi/180.0, 10, 0, 0 )
+        cv::HoughLines( edge, lines, 1, pi/180.0*1, threshold=10 )
         puts "rows / cols #{lines.rows}, #{lines.cols}"
         lines = lines.to_a
 
@@ -53,6 +53,37 @@ class RubikFinder
         a
 	end
 
+	# return an array of points [ pt1.x, pt1.y, pt2.x, pt2.y ]
+	def houghP( edge)
+        # http://docs.opencv.org/2.4/modules/imgproc/doc/feature_detection.html#houghlinesp
+        lines = cv::Mat.new
+
+ 	    # li = cv.HoughLines2(self.d2, cv.CreateMemStorage(), cv.CV_HOUGH_PROBABILISTIC, 1, 3.1415926 / 45, self.THR, 10, 5)
+ 	    #    cv::HoughLinesP( d2, lines, 1, 3.1415926/45, thr = 70, 10, 5 );
+        pi = 3.1415926
+        cv::HoughLinesP( edge, lines, 1, pi/180.0*1, threshold=10, minLineLength=30, maxLineGap=15 )
+        puts "rows / cols #{lines.rows}, #{lines.cols}"
+        lines = lines.to_a
+
+        # puts "lines #{lines[0,1]}"
+
+        a = []
+        b = []
+        lines[0].each_with_index do |l, i|
+        	#puts l
+
+        	if (i % 4) == 0
+        		a << b if b.size > 0
+        		b = []
+        	end
+
+        	b << l
+        end
+
+        a
+	end
+
+
 	# draw line from hough, onto image
 	def drawPolar( lines, dst, count = 50)
 		lines.each_with_index do |l,i|
@@ -70,7 +101,7 @@ class RubikFinder
                   				 (y0 - 2000*(a)))
 
  			# pt1 = cv::Point.new( 0, 0)
-    #     	pt2 = cv::Point.new( 100, 100)
+       #  	pt2 = cv::Point.new( 100, 100)
        	
 
         	#puts [ x0, y0, pt1, pt2 ].to_s
@@ -82,7 +113,15 @@ class RubikFinder
          #    			   cv::Scalar.new(255), 3, 8 )
         	break if i > count
         end
+	end
 
+	def drawSegment( lines, dst, count = 50)
+		lines.each_with_index do |l,i|
+	     	puts [ l[0], l[1], l[2], l[3] ].to_s
+	     	cv::line( @sg, cv::Point.new(l[0], l[1]),
+             			   cv::Point.new(l[2], l[3]),
+             			   cv::Scalar.new(0,0,255), 3, 8 )
+		end
 	end
 
 	def detect( grey)  
@@ -104,27 +143,19 @@ class RubikFinder
         cv::Canny( dst2, dst2, lowThreshold, lowThreshold*ratio, kernel_size  = 3);
 
         # std hough
-        lines = hough( dst2)
-        drawPolar( lines, @sg)
+        if false
+	        lines = hough( dst2)
+    	    drawPolar( lines, @sg)
+    	else
+	        lines = houghP( dst2)
+    	    drawSegment( lines, @sg)
+    	end
 
         #cv::cmpS( d, 8, d2, cv.CV_CMP_GT)
         d2 = cv::Mat.new
+
         # cv::convertScaleAbs( d, d2 )
 
-        # li = cv.HoughLines2(self.d2, cv.CreateMemStorage(), cv.CV_HOUGH_PROBABILISTIC, 1, 3.1415926 / 45, self.THR, 10, 5)
-	    # vector<Vec4i> lines;
-	 #    lines = cv::Mat.new # Std::Vector.new( cv::Vec4i)
-	 #    cv::HoughLinesP( d2, lines, 1, 3.1415926/45, thr = 70, 10, 5 );
-
-		# color_dst = cv::Mat.new( grey.size, cv::CV_8UC3)
-		# l = lines
-	 #    lines.reshape( 1, lines.cols).each_row do |l|
-	 #    	puts [ l[0], l[1], l[2], l[3] ].to_s
-	 #    	cv::line( @sg, cv::Point.new(l[0], l[1]),
-  #           			   cv::Point.new(l[2], l[3]),
-  #           			   cv::Scalar.new(0,0,255), 3, 8 );
-
-	 #    end
         cv::imshow("cube", dst2)
 
   		cv::imshow("lines", @sg)
