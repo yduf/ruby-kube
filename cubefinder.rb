@@ -139,6 +139,8 @@ class RubikFinder
 	        draw_circles_and_lines( @tracker)
 	    end
 
+	    @tracker.detected = false
+
 	    cv::imshow("cube", @dst2)
   		cv::imshow("lines", @sg)
 	end
@@ -227,11 +229,11 @@ class RubikFinder
                 # puts "Circle #{p_int}-#{rad}  #{[ col[0], col[1], col[2]] }"
                 cvCircle( @sg, p_int, rad, [ col[0], col[1], col[2]], -1)
 
-                # if i == 4
-                #     cvCircle( @sg, p_int, rad, [ 0, 255, 255], 2)
-                # else
-                #     cvCircle( @sg, p_int, rad, [255, 255, 255], 2)
-                # end
+                if i == 4
+                    cvCircle( @sg, p_int, rad, [ 0, 255, 255], 2)
+                else
+                    cvCircle( @sg, p_int, rad, [255, 255, 255], 2)
+                end
 
                 hueavg = cvAvg( @hue, roi)
                 satavg = cvAvg( @sat, roi)
@@ -779,7 +781,7 @@ class RubikFinder
                     # good enough!
                     tracker.succ += 1
                     tracker.pt = tracker.prevface
-                    tracker.detected = 1
+                    tracker.detected = true
                     # log.info("detected %d, succ %d" % (self.detected, self.succ))
                 end
             else
@@ -845,7 +847,7 @@ def track_webcam( )
 end
 
 # main test
-if true
+if false
 	# file mode
 	filename = '/home/yves/Pictures/rubik/2017-02-13-182254.jpg'
 	#filename = '/home/yves/Pictures/rubik/2017-02-26-124830.jpg'
