@@ -62,6 +62,12 @@ class RubikFinder
 						:v1, :v2,
 						:p3
 
+		attr_accessor	:prev_grey,
+						:pyramid,
+						:prev_pyramid
+
+		attr_accessor	:features
+
 		def initialize( )			
 	        # stores the coordinates that make up the face. in order: p,p1,p3,p2 (i.e.) counterclockwise winding
 	        @prevface = [ [0, 0], [5, 0], [0, 5]]
@@ -89,6 +95,10 @@ class RubikFinder
 
 		# option
 		@dodetection = true
+
+		# tracking option
+        @win_size = 21
+    	@flags    = 0
 	end
 
 	# analyse one frame (with adaptive threshold from previous frame analysis)
@@ -97,7 +107,7 @@ class RubikFinder
 		# cv::resize( frame, @sg)
  		@width, @height = [ frame.size.width, frame.size.height].map { |x| x / @resize_factor }
 		resized = cv::Size.new( @width, @height )
-		@sg  = cv::Mat.new( resized, cv::CV_8UC3)
+		@sg     = cv::Mat.new( resized, cv::CV_8UC3)
 		cv::resize( frame, @sg, @sg.size(), 0, 0, interpolation = 1);
 
 		#
@@ -106,15 +116,21 @@ class RubikFinder
 		@grey = cv::Mat.new #( frame.size, cv::CV_8U)
         cv::cvtColor( @sg, @grey, CV_RGB2GRAY)
             
-        # detection mode
+        # if was tracking contine tracking on current frame
+        # this work if tracking was initialized
+        if @tracker.tracking
+       		@tracker = verify_still_tracking( @grey, @tracker)
+        end
+
+        # on init or if we lost tracking => detection mode
         if ! @tracker.tracking
+        	@tracker.detected = false
 	        res = detect( @grey) 
  			@tracker = init_tracker( res, @tracker )
  		end
 
  		# tracking mode
- 		@tracker.tracking = false
-        if  false && @tracker.tracking
+        if  @tracker.tracking
         	# we are in tracking mode, we need to fill in pt[] array
             # calculate the pt array for drawing from features
             p  = @tracker.features[0]
@@ -129,22 +145,23 @@ class RubikFinder
 	                       [p[0] + 2 * v1[0] - v2[0], p[1] + 2 * v1[1] - v2[1]]]
 
             @tracker.prevface = [@tracker.pt[0], @tracker.pt[1], @tracker.pt[2]]
-
-	        # tracking mode
-	        @tracker = verify_still_tracking( @tracker)
  		end
 
  		# use pt[] array to do drawing
+ 		puts "detected #{@tracker.detected} - undetectednum #{@tracker.undetectednum}"
  		if ( @tracker.detected || @tracker.undetectednum < 1) && @dodetection
-	        draw_circles_and_lines( @tracker)
+	        @tracker = draw_circles_and_lines( @tracker)
 	    end
 
-	    @tracker.detected = false
+        # prepare for next tracking call
+        @tracker.prev_grey    = @grey
+        @tracker.prev_pyramid = @tracker.pyramid
 
 	    cv::imshow("cube", @dst2)
   		cv::imshow("lines", @sg)
 	end
 
+	# return updtated tracker object
 	def draw_circles_and_lines( tracker)
         # undetectednum 'fills in' a few detection to make
         # things look smoother in case we fall out one frame
@@ -256,6 +273,8 @@ class RubikFinder
             @hsvs[ @selected] = hsvcs
             @selected = [ @selected + 1, 5].min
         end
+
+        tracker
     end
 
 	# detect lines
@@ -797,12 +816,12 @@ class RubikFinder
                 pt = []
                 [ 1.0/3, 2.0/3].each do |i|
                 	[ 1.0/3, 2.0/3].each do |j|
-                         # pt << [ @p0[0] + i * @v1[0] + j * @v2[0], 
-                         		 # @p0[1] + i * @v1[1] + j * @v2[1] ]
+                         pt << [ tracker.p0[0] + i * tracker.v1[0] + j * tracker.v2[0], 
+                         		 tracker.p0[1] + i * tracker.v1[1] + j * tracker.v2[1] ]
                  	end
               	end
 
-                @features = pt
+                tracker.features = pt
                 tracker.tracking = true
                 tracker.succ     = 0
                 # log.info("non-tracking -> tracking: succ %d" % self.succ)
@@ -813,9 +832,87 @@ class RubikFinder
 	    tracker
     end
 
-	def verify_still_tracking( tracker)
+	def verify_still_tracking( grey, tracker)
+		puts "tracking"
+        tracker.detected = 2
+
+        # compute optical flow
+        status = cv::Mat.new
+        err    = cv::Mat.new
+
+        mat_features = cv::Mat.new( tracker.features.size, 2, cv::CV_32F)
+        tracker.features.each_with_index do |p,i| 
+        	mat_features[i,0] = p[0]
+        	mat_features[i,1] = p[1]
+        end
+
+        # puts mat_features.checkVector(2, cv::CV_32F, true) 
+        winSize = cv::Size.new( @win_size, @win_size)
+        maxLevel = 3
+
+		# tracker.pyramid = Std::Vector::Cv_Mat.new
+		# cv::buildOpticalFlowPyramid( grey, tracker.pyramid,
+		# 							winSize, maxLevel)
+
+		# if not tracker.prev_pyramid
+		# 	tracker.prev_pyramid = Std::Vector::Cv_Mat.new
+		# 	cv::buildOpticalFlowPyramid( tracker.prev_grey, tracker.prev_pyramid,
+		# 									winSize, maxLevel)			
+		# end
+
+        puts mat_features.to_a.to_s
+		new_features = cv::Mat.new
+
+        cv::calcOpticalFlowPyrLK(
+            tracker.prev_grey, grey, 			#tracker.prev_pyramid, pyramid,
+            mat_features,  new_features, 
+            status,	err,						# output
+            winSize, 
+            maxLevel,
+            cv::TermCriteria.new( cv::TermCriteria::MAX_ITER + 
+            					  cv::TermCriteria::EPS, max_iter = 20, accuracy= 0.03),
+            @flags)
+
+        # set back the points we keep
+        puts new_features.to_a.to_s
+        #puts status.zip( new_features.to_a).to_s
+        tracker.features = status.zip( new_features.to_a)
+        						.keep_if { |x| st, p = x;  st }
+        						.map { |x| st, p = x; p}
+        # puts tracker.features.to_s
+
+        if tracker.features.size < 4
+            tracker.tracking = false  # we lost it, restart search
+            puts "tracking -> not tracking: len features #{tracker.features.size } < 4"
+        else
+            # make sure that in addition the distances are consistent
+            ds1 = ptdst( tracker.features[0], tracker.features[1])
+            ds2 = ptdst( tracker.features[2], tracker.features[3])
+
+            if [ ds1, ds2].max / [ ds1, ds2].min > 1.4
+                tracker.tracking = false
+                puts "tracking -> not tracking: max/min ds1 #{ds1}, ds2 #{ds2} > 1.4"
+            end
+
+            ds3 = ptdst( tracker.features[0], tracker.features[2])
+            ds4 = ptdst( tracker.features[1], tracker.features[3])
+
+            if [ ds3, ds4].max / [ ds3, ds4].min > 1.4
+                tracker.tracking = false
+                puts "tracking -> not tracking: max/min ds3 #{ds3}, ds4 #{ds4} > 1.4"
+            end
+
+            if ds1 < 10 || ds2 < 10 || ds3 < 10 || ds4 < 10
+                tracker.tracking = false
+                puts "tracking -> not tracking: ds1 #{ds1}, ds2 #{ds2}, ds3 #{ds3}, ds4 #{ds4}"
+            end
+
+            tracker.detected = false if not tracker.tracking
+		end
+
 		tracker
 	end
+	    
 end # class RubikFinder
 
 # analyze file as if it comes from a video stream (to allow adaptative threshold)
