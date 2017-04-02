@@ -14,6 +14,22 @@ def avg(p1, p2)
     [ 0.5 * (p1[0] + p2[0]), 0.5 * (p2[1] + p2[1]) ]
 end
 
+
+def intersect_seg(x1, x2, x3, x4, y1, y2, y3, y4)
+    den = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1)
+
+    return [ false, [0, 0], [0, 0]] if den.abs < 0.1
+
+    ua = (x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)
+    ub = (x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)
+    ua = ua / den
+    ub = ub / den
+    x = x1 + ua * (x2 - x1)
+    y = y1 + ua * (y2 - y1)
+
+    [ true, [ua, ub], [x, y]]
+end
+
 # return the pts in correct order based on quadrants
 def winded(p1, p2, p3, p4)
     avg = [ 0.25 * (p1[0] + p2[0] + p3[0] + p4[0]), 
@@ -43,9 +59,62 @@ def cvCircle( img, center, radius, col, width = 1)
 	cv.circle( img, cv::Point.new( center[0], center[1]), radius, cv::Scalar.new(col[0], col[1], col[2]), width)
 end
 
+def drawX( p, p1, p2, p3, col1 = [0,255,0], col2 = [0,0,255])
+    cvLine( @sg,p,p1, col1,2)
+    cvLine( @sg,p,p2, col1,2)
+    cvLine( @sg,p2,p3,col1,2)
+    cvLine( @sg,p3,p1,col1,2)
+
+    cen=[0.5*p2[0]+0.5*p1[0],0.5*p2[1]+0.5*p1[1]]  
+    cvCircle( @sg, cen, 20, col2,5)
+    #cvLine( @sg, [0,cen[1]], [320,cen[1]], [0,255,0],2)
+    #cvLine( @sg, [cen[0],0], [cen[0],240], [0,255,0],2)
+end
+
+def drawBox( pt_int)
+    col = [0, 255, 0]
+    cvLine( @sg, pt_int[0], pt_int[1], col, 2)
+    cvLine( @sg, pt_int[1], pt_int[3], col, 2)
+    cvLine( @sg, pt_int[3], pt_int[2], col, 2)
+    cvLine( @sg, pt_int[2], pt_int[0], col, 2)
+end
+
+def drawSegment( lines, img, count = 50)
+    lines.each_with_index do |l,i|
+        # puts [ l[0], l[1], l[2], l[3] ].to_s
+        cvLine( img, [l[0], l[1]], 
+                     [l[2], l[3]], 
+                     [0,255,0])
+    end
+end
+
+def drawCorner( img, points, size = 5, color = [255,255,255])
+    # cv.Circle(sg, IT[0], 5, (255,255,255))
+    points.each do | l|
+        cvCircle( img, l, 5, color, size)
+    end
+end
+
+
+# convert input rgb image to grey
+def to_grey( rgb)
+    grey = cv::Mat.new #( frame.size, cv::CV_8U)
+    cv::cvtColor( rgb, grey, CV_RGB2GRAY)
+    grey
+end
+
+# remap one dimension image to rgb space
+def to_color( grey)
+    rgb = cv::Mat.new
+    cv::cvtColor( grey, rgb, CV_GRAY2RGB)
+    rgb
+end
+
 # detect cube according to XXX
 class RubikFinder
-	DECTS = 100						# ideal number of number of lines detections
+	DECTS = 100						# ideal number of lines detections
+
+    attr_reader :tracker            # get current tracker state
 
 	class Tracking
 		attr_accessor 	:prevface,
@@ -66,7 +135,12 @@ class RubikFinder
 						:pyramid,
 						:prev_pyramid
 
-		attr_accessor	:features
+		attr_accessor	:features,
+                        :colors,
+                        :center_pixels
+
+        attr_accessor   :minLineLength,
+                        :maxLineGap       
 
 		def initialize( )			
 	        # stores the coordinates that make up the face. in order: p,p1,p3,p2 (i.e.) counterclockwise winding
@@ -80,7 +154,20 @@ class RubikFinder
 
 	        @detected = false
 	        @undetectednum = 100
+
+            # hough parameter
+            @minLineLength = 30 
+            @maxLineGap    = 12
 	    end
+
+        # tell if cube was detected and current face is analyzed
+        def detected?
+            @detected || @undetectednum < 1
+        end
+
+        def good?
+            @tracking 
+        end
 	end # class Tracking
 
 
@@ -93,29 +180,39 @@ class RubikFinder
 
 		@tracker = Tracking.new		# internal state for tracking
 
-		# option
-		@dodetection = true
-
 		# tracking option
         @win_size = 21
     	@flags    = 0
 	end
 
+    # resized input
+    def resize( frame, resize_factor)
+        @width, @height = [ frame.size.width, frame.size.height].map { |x| x / resize_factor }
+        resized = cv::Size.new( @width, @height )
+        sg     = cv::Mat.new( resized, cv::CV_8UC3)
+        cv::resize( frame, sg, sg.size(), 0, 0, interpolation = 1);
+
+        sg
+    end
+
 	# analyse one frame (with adaptive threshold from previous frame analysis)
-	def analyze_frame( frame)
-		# create  some buffer
-		# cv::resize( frame, @sg)
- 		@width, @height = [ frame.size.width, frame.size.height].map { |x| x / @resize_factor }
-		resized = cv::Size.new( @width, @height )
-		@sg     = cv::Mat.new( resized, cv::CV_8UC3)
-		cv::resize( frame, @sg, @sg.size(), 0, 0, interpolation = 1);
+    # it can be used to analyze the same frame several taime
+    # producing different output
+	def analyze_frame( frame, tracker = nil)
+        @tracker = tracker if tracker     # import tracking status from extern
 
-		#
-		@sgc  = @sg.clone
+		# resized input before processing
+        @sg     = resize( frame, @resize_factor)        # will be used for display
+		@sgc    = @sg.clone               # copy for latter color extraction
 
-		@grey = cv::Mat.new #( frame.size, cv::CV_8U)
-        cv::cvtColor( @sg, @grey, CV_RGB2GRAY)
-            
+        # Denoising - very consuming
+        # cv::fastNlMeansDenoisingColored( @sg, @sg)
+		@grey = to_grey( @sg)
+
+        # this could be move in dectect function, but we use it for display
+        @dst2 = laplacian( @grey)       
+        @lap  = to_color( @dst2)         # convert back to color for display
+                  
         # if was tracking contine tracking on current frame
         # this work if tracking was initialized
         if @tracker.tracking
@@ -125,7 +222,7 @@ class RubikFinder
         # on init or if we lost tracking => detection mode
         if ! @tracker.tracking
         	@tracker.detected = false
-	        res = detect( @grey) 
+	        res = detect( @dst2) 
  			@tracker = init_tracker( res, @tracker )
  		end
 
@@ -147,22 +244,117 @@ class RubikFinder
             @tracker.prevface = [@tracker.pt[0], @tracker.pt[1], @tracker.pt[2]]
  		end
 
- 		# use pt[] array to do drawing
- 		puts "detected #{@tracker.detected} - undetectednum #{@tracker.undetectednum}"
- 		if ( @tracker.detected || @tracker.undetectednum < 1) && @dodetection
-	        @tracker = draw_circles_and_lines( @tracker)
-	    end
-
         # prepare for next tracking call
         @tracker.prev_grey    = @grey
         @tracker.prev_pyramid = @tracker.pyramid
 
-	    cv::imshow("cube", @dst2)
-  		cv::imshow("lines", @sg)
+
+ 		# use pt[] array to do drawing
+ 		if @tracker.detected?
+            # this init tracker
+	        @tracker = draw_circles_and_lines( @tracker, extract = true)
+	    end
+
+        # display images, with content
+	    cv::imshow("lines", @lap)
+        #cv::imshow("corner",  @corner)
+  		cv::imshow("cube", @sg)
+
+
+
+        # return tracker state
+        @tracker
 	end
 
+    # convert to HSV
+    def hsv( color)
+        @hsv = cv::Mat.new
+        cv::cvtColor( color, @hsv, CV_RGB2HSV)
+
+        channel = Std::Vector::Cv_Mat.new
+        cv::split( @hsv, channel )
+        [ channel[0], channel[1], channel[2] ]
+    end
+
+    def rgb( color)
+        channel = Std::Vector::Cv_Mat.new
+        cv::split( color, channel )
+        [ channel[0], channel[1], channel[2] ]
+    end
+
+    def extraction_point( tracker)
+        # find the coordinates of the 9 places we want to extract over
+        # first sort the points so that 0 is BL 1 is UL and 2 is BR
+        pt = winded( tracker.pt[0], tracker.pt[1], tracker.pt[2], tracker.p3)
+
+        tracker.v1 = [ pt[1][0] - pt[0][0], pt[1][1] - pt[0][1] ]
+        tracker.v2 = [ pt[3][0] - pt[0][0], pt[3][1] - pt[0][1] ]
+        tracker.p0 = [ pt[0][0],  pt[0][1]]
+
+        ep = []         # extraction point
+        i = 1
+        j = 5
+        for k in 0..8
+            ep << [ tracker.p0[0] + i * tracker.v1[0] / 6.0 + j * tracker.v2[0] / 6.0,
+                    tracker.p0[1] + i * tracker.v1[1] / 6.0 + j * tracker.v2[1] / 6.0]
+            i = i + 2
+            if i == 7
+                i = 1
+                j = j - 2
+            end
+        end
+
+        [ ep, tracker]
+    end
+
+    def extract_color( tracker, extract)
+        cs = []
+        center_pixels = []
+
+        den = @resize_factor
+        ep, tracker = extraction_point( tracker)
+        rad = ptdst( tracker.v1, [ 0.0, 0.0] ) / 6.0
+
+        drawCorner( @lap, ep, rad, [ 255, 0, 0] )
+
+        ep.each_with_index do |p, i|
+            # puts i
+            if p[0] > rad && p[0] < @width  - rad &&
+               p[1] > rad && p[1] < @height - rad
+
+                # valavg=val[int(p[1]-rad/3):int(p[1]+rad/3),int(p[0]-rad/3):int(p[0]+rad/3)]
+                # mask=cv.CreateImage(cv.GetDims(valavg), 8, 1 )
+                # avg x2 times
+                roi = [ (p[0] - rad / den), (p[1] - rad / den)], 
+                      [ (p[0] + rad / den), (p[1] + rad / den)]
+                col = cvAvg( @sgc, roi).to_a
+
+                # p_int = [ p[0], p[1] ]
+                # puts "Circle #{p_int}-#{rad}  #{[ col[0], col[1], col[2]] }"
+                cvCircle( @sg, p, rad, [ col[0], col[1], col[2]], -1)
+
+                if i == 4
+                    cvCircle( @sg, p, rad, [ 0, 255, 255], 2)
+                else
+                    cvCircle( @sg, p, rad, [255, 255, 255], 2)
+                end
+
+                # extract face 
+                b,g,r = col
+                cs << [ r, g, b]           # rgb color
+
+                if extract
+                    center_pixels << [p[0] * den, p[1] * den] # pixel coordinate in frame
+                    # hsvcs << [ hueavg, satavg]    # hue , sat
+                end
+            end
+        end
+
+        [ cs, center_pixels ]
+    end
+
 	# return updtated tracker object
-	def draw_circles_and_lines( tracker)
+	def draw_circles_and_lines( tracker, extract )
         # undetectednum 'fills in' a few detection to make
         # things look smoother in case we fall out one frame
         # for some reason
@@ -176,14 +368,6 @@ class RubikFinder
             tracker.lastpt = tracker.pt
         end
 
-        # convert to HSV
-        @hsv = cv::Mat.new
-        cv::cvtColor( @sgc, @hsv, CV_RGB2HSV)
-
-        channel = Std::Vector::Cv_Mat.new
-        cv::split( @hsv, channel )
-        @hue, @sat, @val = [ channel[0], channel[1], channel[2] ]
-
         pt_int = []
         tracker.pt.each do |p|
         	foo, bar = p
@@ -193,119 +377,22 @@ class RubikFinder
         # do the drawing. pt array should store p,p1,p2
         tracker.p3 = [	tracker.pt[2][0] + tracker.pt[1][0] - tracker.pt[0][0], 
         				tracker.pt[2][1] + tracker.pt[1][1] - tracker.pt[0][1] ]
-        p2_int = [ tracker.p2[0], tracker.p2[1] ]
+        #p2_int = [ tracker.p2[0], tracker.p2[1] ]
         p3_int = [ tracker.p3[0], tracker.p3[1] ]
+        pt_int << p3_int
 
-        col = [0, 255, 0]
-        cvLine( @sg, pt_int[0], pt_int[1], col, 2)
-        cvLine( @sg, pt_int[1], p3_int,    col, 2)
-        cvLine( @sg, p3_int,    pt_int[2], col, 2)
-        cvLine( @sg, pt_int[2], pt_int[0], col, 2)
+        drawBox( pt_int)
+        cs, center_pixels = extract_color( tracker, extract)
 
-        # first sort the points so that 0 is BL 1 is UL and 2 is BR
-        pt = winded( tracker.pt[0], tracker.pt[1], tracker.pt[2], tracker.p3)
-
-        # find the coordinates of the 9 places we want to extract over
-        tracker.v1 = [ pt[1][0] - pt[0][0], pt[1][1] - pt[0][1] ]
-        tracker.v2 = [ pt[3][0] - pt[0][0], pt[3][1] - pt[0][1] ]
-        tracker.p0 = [ pt[0][0], pt[0][1]]
-
-        ep = []
-        i = 1
-        j = 5
-        for k in 0..8
-            ep << [ tracker.p0[0] + i * tracker.v1[0] / 6.0 + j * tracker.v2[0] / 6.0,
-                    tracker.p0[1] + i * tracker.v1[1] / 6.0 + j * tracker.v2[1] / 6.0]
-            i = i + 2
-            if i == 7
-                i = 1
-                j = j - 2
-            end
-        end
-
-        rad = ptdst(tracker.v1, [ 0.0, 0.0] ) / 6.0
-        cs = []
-        center_pixels = []
-        hsvcs = []
-        den = 2
-
-        ep.each_with_index do |p, i|
-        	# puts i
-            if p[0] > rad && p[0] < @width - rad &&
-               p[1] > rad && p[1] < @height - rad
-
-                # valavg=val[int(p[1]-rad/3):int(p[1]+rad/3),int(p[0]-rad/3):int(p[0]+rad/3)]
-                # mask=cv.CreateImage(cv.GetDims(valavg), 8, 1 )
-                # avg x2 times
-                roi = [ (p[0] - rad / den), (p[1] - rad / den)], 
-                      [ (p[0] + rad / den), (p[1] + rad / den)]
-                col = cvAvg( @sgc, roi)
-                col = cvAvg( @sgc, roi)
-
-                p_int = [ p[0], p[1] ]
-                # puts "Circle #{p_int}-#{rad}  #{[ col[0], col[1], col[2]] }"
-                cvCircle( @sg, p_int, rad, [ col[0], col[1], col[2]], -1)
-
-                if i == 4
-                    cvCircle( @sg, p_int, rad, [ 0, 255, 255], 2)
-                else
-                    cvCircle( @sg, p_int, rad, [255, 255, 255], 2)
-                end
-
-                hueavg = cvAvg( @hue, roi)
-                satavg = cvAvg( @sat, roi)
-
-                # cv.PutText(self.sg, repr(int(hueavg[0])), [ p_int[0] + 70, p_int[1]], self.ff, [255, 255, 255])
-                # cv.PutText(self.sg, repr(int(satavg[0])), [ p_int[0] + 70, p_int[1] + 10], self.ff, [255, 255, 255])
-
-                if @extract
-                    cs << col
-                    center_pixels << [p_int[0] * den, p_int[1] * den]
-                    hsvcs << [ hueavg[0], satavg[0]]
-                end
-        	end
-        end
-
-        if @extract
-            @extract = false
-            @colors[ @selected] = cs
-            @center_pixels[ @selected] = center_pixels
-            @hsvs[ @selected] = hsvcs
-            @selected = [ @selected + 1, 5].min
+        if extract
+            tracker.colors        = cs
+            tracker.center_pixels = center_pixels
         end
 
         tracker
     end
 
 	# detect lines
-	# return an array of [rho, theta]
-	def hough( edge)
-        # http://docs.opencv.org/2.4/modules/imgproc/doc/feature_detection.html#houghlinesp
-        lines = cv::Mat.new
-
-        pi = 3.1415926
-        cv::HoughLines( edge, lines, 1, pi/180.0*1, threshold=10, srn=2, stn=2 )
-        #puts "rows / cols #{lines.rows}, #{lines.cols}"
-        lines = lines.to_a
-
-        # puts "lines #{lines[0,1]}"
-
-        a = []
-        b = []
-        lines[0].each_with_index do |l, i|
-        	#puts l
-
-        	if (i % 2) == 0
-        		a << b if b.size > 0
-        		b = []
-        	end
-
-        	b << l
-        end
-
-        a
-	end
-
 	# return an array of points [ pt1.x, pt1.y, pt2.x, pt2.y ]
 	def houghP( edge, threshold = 70)
         # http://docs.opencv.org/2.4/modules/imgproc/doc/feature_detection.html#houghlinesp
@@ -314,7 +401,9 @@ class RubikFinder
  	    # li = cv.HoughLines2(self.d2, cv.CreateMemStorage(), cv.CV_HOUGH_PROBABILISTIC, 1, 3.1415926 / 45, self.THR, 10, 5)
  	    # cv::HoughLinesP( d2, lines, 1, 3.1415926/45, thr = 70, 10, 5 );
         pi = 3.1415926
-        cv::HoughLinesP( edge, lines, 1, pi/45, threshold, minLineLength=10, maxLineGap=20 )
+        cv::HoughLinesP( edge, lines, 2, 1*pi/180, threshold, 
+                         minLineLength=@tracker.minLineLength, 
+                         maxLineGap=@tracker.maxLineGap )
         #puts "rows / cols #{lines.rows}, #{lines.cols}"
         lines = lines.to_a
 
@@ -337,70 +426,35 @@ class RubikFinder
         a
 	end
 
-
-	# draw line from hough, onto image
-	def drawPolar( lines, dst, count = 100)
-		lines = lines[1..count].reverse
-		lines.each_with_index do |l,i|
-        	puts l.to_s
-        	rho   = l[0]
-        	theta = l[1]
-        	a = Math::cos(theta)
-        	b = Math::sin(theta)
-        	x0 = a*rho
-        	y0 = b*rho
-
-			pt1 = cv::Point.new( (x0 + 2000*(-b)),
-                  				 (y0 + 2000*(a)))
-        	pt2 = cv::Point.new( (x0 - 2000*(-b)),
-                  				 (y0 - 2000*(a)))
-
- 			# pt1 = cv::Point.new( 0, 0)
-       #  	pt2 = cv::Point.new( 100, 100)
-       	
-
-        	#puts [ x0, y0, pt1, pt2 ].to_s
-        	cv::line( dst, pt1, pt2,
-            			   cv::Scalar.new(0,i,255 -2*i), 3, 8 )
-
-
-       		# cv::line( dst2, pt1, pt2,
-         #    			   cv::Scalar.new(255), 3, 8 )
-        	break if i > count
-        end
-	end
-
-	def drawSegment( lines, dst, count = 50)
-		lines.each_with_index do |l,i|
-	     	# puts [ l[0], l[1], l[2], l[3] ].to_s
-	     	cvLine( @sg, [l[0], l[1]], 
-	     				 [l[2], l[3]], 
-	     				 [0,0,255])
-		end
-	end
-
-	def drawCorner( to_try)
-  		# cv.Circle(sg, IT[0], 5, (255,255,255))
-  		to_try.each do | it|
-  			l = it[0]
-  			cvCircle(@sg, [ l[0], l[1]], 5, [255,255,255])
-  		end
-	end
-
 	# edge filtering preparation for hough transform = 1
 	CV_CMP_GT = 1
 	CV_CMP_LT = 2
 
+    def laplacian3
+        i1 = laplacian( @red)
+        i2 = laplacian( @green)
+        i3 = laplacian( @blue)
+
+        i1+i2+i3
+    end
+
 	def laplacian( grey)
+        i = 1
+
 		out = cv::Mat.new
+
+        # Apply Histogram Equalization
+        # 
+
+        #cv::medianBlur( out, out, 3)
+        cv::GaussianBlur( grey, out, cv::Size.new( 0, 0 ), i, i)
+        #cv::equalizeHist( out, out )
 
       	# edge detection
       	# http://docs.opencv.org/2.4/doc/tutorials/imgproc/imgtrans/laplace_operator/laplace_operator.html?highlight=laplacian       
-        i = 1
-        cv::GaussianBlur( grey, out, cv::Size.new( 0, 0 ), i, i)
-
-        # cv::Laplacian( dst2, d, cv::CV_16S)
-        cv::Laplacian( out, out, ddepth = cv::CV_16S) #, kernel_size = 1, scale = 10, delta = 0 )
+        #cv::GaussianBlur( out, out, cv::Size.new( 0, 0 ), i, i)
+        cv::Laplacian( out, out, ddepth = cv::CV_16S, 
+                       kernel_size = 1, scale = 1, delta = 0 )
 
         # cv.CmpS(self.d, 8, self.d2, cv.CV_CMP_GT)
         cmp = cv::Mat.new [ threshold = 4] 
@@ -421,29 +475,20 @@ class RubikFinder
         out
 	end
 
-	def canny( dst2)
-        # http://docs.opencv.org/2.4/modules/imgproc/doc/feature_detection.html#houghlinesp
-        # http://docs.opencv.org/2.4/doc/tutorials/imgproc/imgtrans/canny_detector/canny_detector.html
-        lowThreshold = 50
-        ratio = 3
-        cv::Canny( dst2, dst2, lowThreshold, lowThreshold*ratio, kernel_size  = 3);
- 
- 		dst2
-	end
-
-	def detect( grey)  
-        @dst2 = laplacian( grey)
-
+    # detect line in images
+    # and try to map a grid on them
+	def detect( grey)
         # these weights should be adaptive. We should always detect 100 lines
-        @thr = @thr + 1 if @lastdetected > DECTS
+        @thr = @thr + 1           if @lastdetected > DECTS + 20
         @thr = [ 2, @thr - 1].max if @lastdetected < DECTS
 
-	    detected = houghP( @dst2, @thr)
+	    detected = houghP( grey, @thr)
 	    @lastdetected = detected.size
-	    puts "\#lines #{@lastdetected } - thr : #{@thr}"
+	    #puts "\#lines #{@lastdetected } - thr : #{@thr}"
 
-	    lines = detected[0..99]
-    	# drawSegment( lines, @sg)
+	    lines = detected[0..DECTS]
+    	drawSegment( lines, @lap)
+
   		to_try = find_corner( lines)
   		# drawCorner( to_try)
  
@@ -464,20 +509,6 @@ class RubikFinder
 		  [ l[2], l[3]] ]
 	end
 
-	def intersect_seg(x1, x2, x3, x4, y1, y2, y3, y4)
-	    den = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1)
-
-	    return [ false, [0, 0], [0, 0]] if den.abs < 0.1
-
-	    ua = (x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)
-	    ub = (x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)
-	    ua = ua / den
-	    ub = ub / den
-	    x = x1 + ua * (x2 - x1)
-	    y = y1 + ua * (y2 - y1)
-
-	    [ true, [ua, ub], [x, y]]
-	end
 
 	# is t1 close to t2 within t?
 	def areclose(t1, t2, t)
@@ -553,6 +584,8 @@ class RubikFinder
         return false
 	end
 
+    # given to line [p1, p2], [qA, q2]
+    # 
 	def test_lines( li_i, li_j, t)
     	p1, p2 = seg2points( li_i)
 		q1, q2 = seg2points( li_j)
@@ -586,6 +619,7 @@ class RubikFinder
         end
 
 		# not touching at corner... try also inner grid segments hypothesis?
+        # disable for the
         if matched == 0
             matched, it = matched_0( li_i, li_j)
         end
@@ -732,18 +766,6 @@ class RubikFinder
 	    return totd / 4
 	end
 
-	def drawX( p, p1, p2, p3, col1 = [0,255,0], col2 = [0,0,255])
-	    cvLine( @sg,p,p1, col1,2)
-	    cvLine( @sg,p,p2, col1,2)
-	    cvLine( @sg,p2,p3,col1,2)
-	    cvLine( @sg,p3,p1,col1,2)
-
-	    cen=[0.5*p2[0]+0.5*p1[0],0.5*p2[1]+0.5*p1[1]]  
-	    cvCircle( @sg, cen, 20, col2,5)
-	    #cvLine( @sg, [0,cen[1]], [320,cen[1]], [0,255,0],2)
-	    #cvLine( @sg, [cen[0],0], [cen[0],240], [0,255,0],2)
-	end
-
 	# convert [p, p1, p2] to [p, p1, p2, p3]
 	def p3v( vecp12)
         p, p1, p2 = vecp12
@@ -833,7 +855,7 @@ class RubikFinder
     end
 
 	def verify_still_tracking( grey, tracker)
-		puts "tracking"
+		# puts "tracking"
         tracker.detected = 2
 
         # compute optical flow
@@ -850,21 +872,23 @@ class RubikFinder
         winSize = cv::Size.new( @win_size, @win_size)
         maxLevel = 3
 
-		# tracker.pyramid = Std::Vector::Cv_Mat.new
-		# cv::buildOpticalFlowPyramid( grey, tracker.pyramid,
-		# 							winSize, maxLevel)
+        #
+		tracker.pyramid = Std::Vector::Cv_Mat.new
+		cv::buildOpticalFlowPyramid( grey, tracker.pyramid,
+									 winSize, maxLevel)
 
-		# if not tracker.prev_pyramid
-		# 	tracker.prev_pyramid = Std::Vector::Cv_Mat.new
-		# 	cv::buildOpticalFlowPyramid( tracker.prev_grey, tracker.prev_pyramid,
-		# 									winSize, maxLevel)			
-		# end
+		if not tracker.prev_pyramid
+			tracker.prev_pyramid = Std::Vector::Cv_Mat.new
+			cv::buildOpticalFlowPyramid( tracker.prev_grey, tracker.prev_pyramid,
+										 winSize, maxLevel)			
+		end
 
-        puts mat_features.to_a.to_s
+        # puts mat_features.to_a.to_s
 		new_features = cv::Mat.new
 
         cv::calcOpticalFlowPyrLK(
-            tracker.prev_grey, grey, 			#tracker.prev_pyramid, pyramid,
+            tracker.prev_grey, grey, 			
+            # tracker.prev_pyramid, tracker.pyramid,
             mat_features,  new_features, 
             status,	err,						# output
             winSize, 
@@ -874,12 +898,14 @@ class RubikFinder
             @flags)
 
         # set back the points we keep
-        puts new_features.to_a.to_s
+        # puts new_features.to_a.to_s
         #puts status.zip( new_features.to_a).to_s
         tracker.features = status.zip( new_features.to_a)
-        						.keep_if { |x| st, p = x;  st }
+        						.keep_if { |x| st, p = x;  st > 0 }
         						.map { |x| st, p = x; p}
         # puts tracker.features.to_s
+        drawCorner( @lap, tracker.features, 5, [ 0, 255, 0] )
+
 
         if tracker.features.size < 4
             tracker.tracking = false  # we lost it, restart search
@@ -918,40 +944,282 @@ end # class RubikFinder
 # analyze file as if it comes from a video stream (to allow adaptative threshold)
 ATTEMPTS = 10
 
-def analyse_file( filename)
+require 'tco'
 
+# cube as colored string
+def cube_to_s( colors)
+ colors.map { |c|"  ".bg c }
+        .each_slice(3)
+        .to_a.map { |x| x.join("") }
+        .join("\n")
+end
+
+# convert RGB to HSV 
+# return [ h, s, v]
+def RGBtoHSV( rgb )
+   r, g, b = rgb
+
+   rc = r / 255.0
+   gc = g / 255.0
+   bc = b / 255.0
+   max = [ rc, gc, bc].max
+   min = [ rc, gc, bc].min
+   delta = max - min;
+   v = max
+
+   s = if max != 0.0
+      delta / max
+   else
+      0.0
+   end
+
+   if (s == 0.0) 
+      h = 0.0
+   else 
+      if (rc == max)
+        h = (gc - bc) / delta
+      elsif (gc == max)
+        h = 2 + (bc - rc) / delta
+      elsif (bc == max)
+        h = 4 + (rc - gc) / delta
+      end
+
+      h *= 60.0
+
+      h += 360.0 if h < 0
+   end
+
+   [ h, s, v]
+end
+
+# find nearest color 
+class ColorMatcher
+    @@rgb_keys = {
+        red:    [ 255,   0,   0],
+        orange: [ 255, 165,   0],
+        blue:   [   0,   0, 255],
+        green:  [   0, 255,   0],
+        yellow: [ 255, 255,   0],
+        white:  [ 255, 255, 255],
+        black:  [   0,   0,   0]
+    }
+
+    def initialize()
+        # convert RGB definition to HSV for matching
+        @hsv_keys = {}
+        @@rgb_keys.each { |k, v|
+            @hsv_keys[k] = RGBtoHSV( v)
+        }
+
+        puts @hsv_keys.to_s
+    end
+
+    # find color name
+    def name( color)
+        h,s,v = RGBtoHSV( color)
+
+        # distinguish white /black/color
+        if s < 0.3  # probably white or black
+            if v > 0.3
+                h = [ :white, @hsv_keys[ :white] ]
+                puts h.to_s
+                h
+            else
+                h = [ :black, @hsv_keys[ :black] ]
+                h
+            end
+        else
+            puts @hsv_keys.min_by { |k,v| (v[0] - h).abs }.to_s 
+            @hsv_keys.min_by { |k,v| (v[0] - h).abs }
+        end
+        # find color
+    end
+
+    # convert name to RGB
+    def getRGB( names)
+        names.map { |x|
+            @@rgb_keys[ x]
+        }
+    end
+
+end
+
+def getTargetColor( colors)
+    cm = ColorMatcher.new
+
+    colors.map { |x|
+        cm.name( x).first
+    }
+end
+
+def good!( tracker)
+
+    pp tracker
+    puts cube_to_s( tracker.colors)
+
+    cm = ColorMatcher.new
+    tracker.colors.each { |x|
+        puts RGBtoHSV( x).to_s
+     }
+
+    names = getTargetColor( tracker.colors)
+    rgb   = cm.getRGB( names)
+
+    puts cube_to_s( rgb)    
+end
+
+def analyse_file( filename)
+    @hsvs = []
 	img = cv::imread( filename)
 
 	rf = RubikFinder.new( 2)
 
 	for i in 1..ATTEMPTS
-		rf.analyze_frame( img)
+        puts "\##{i}"
+		tracker = rf.analyze_frame( img)
+
+        if tracker.good?
+            good!( tracker)
+            return
+        end
+
 		cv::wait_key( 1)
 	end
 end
 
-def track_webcam( )
+# realtime cube tracker for given camera
+# sync threshold with UI
+def track_webcam( cam = 0)
 	# video mode
-	video_file = cv::VideoCapture.new( 0)
+	video_file = cv::VideoCapture.new( cam)
 	frame = cv::Mat.new
 	rubik = RubikFinder.new
 
+    #
+    # int createTrackbar(const String& trackbarname, const String& winname, int* value, int count, TrackbarCallback onChange=0, void* userdata=0)
+    # thr = 0
+    # cv::setTrackbarPos       
+
+    # first step 
+    video_file.read( frame)
+    puts [ frame.size.width, frame.size.height].to_s
+
+    # continuous 
+    tracker = rubik.tracker
+    cv::setTrackbarPos( "minLineLength", "LLines", tracker.minLineLength)
+    cv::setTrackbarPos( "maxLineGap", "LLines", tracker.maxLineGap)
+
 	while true do
 		video_file.read( frame)
-		rubik.analyze_frame( frame)
-		cv::wait_key( 1)
+        
+        # manipulate state 
+        if tracker
+            tracker.minLineLength = cv::getTrackbarPos( "minLineLength", "LLines")
+            tracker.maxLineGap = cv::getTrackbarPos( "maxLineGap", "LLines")
+
+            # tracker.tracking = false        # force detect mode always
+        end
+
+		tracker = rubik.analyze_frame( frame, tracker)
+
+		key_press = cv::wait_key( 1)
+
+        yield tracker, key_press if block_given?
 	end
 end
 
+# direct FFI version for 
+# c interface 
+# int cvCreateTrackbar(const char* trackbar_name, const char* window_name, int* value, int count, CvTrackbarCallback on_change=NULL )
+require 'ffi'
+
+module OpenCV
+  extend FFI::Library
+  ffi_lib 'libopencv_highgui.so'
+  attach_function :cvCreateTrackbar, :cvCreateTrackbar,[ :string, :string, :pointer, :int, :pointer ], :int
+end
+
+def init_ui()
+    # att UI for threshold
+    cv::namedWindow("LLines", 1);
+    cvCreateTrackbar( "minLineLength", "LLines", valuep = nil, count = 200, onChange=nil)
+    cvCreateTrackbar( "maxLineGap", "LLines", valuep = nil, count = 200, onChange=nil)
+end
+
 # main test
+if __FILE__ == $0
+
+def input_key2action( key_press )
+    case key_press.ch
+    # reset search
+    when 'a'
+        :reset
+    # save image
+    when 's'
+        :save_frame
+    # store rgb snap for given face
+    when 'u', 'l', 'f', 'r', 'b', 'd'
+        puts "save face #{key_press.chr}"
+        :store_face
+        # @colors[ key_press.chr] = tracker.colors
+    # resolve color attributuion for whole cube
+    when 'p'
+        puts "resolve whole faces color"
+        :resolve_color
+    else
+        :none
+    end
+rescue
+    :none
+end
+
 if false
 	# file mode
 	filename = '/home/yves/Pictures/rubik/2017-02-13-182254.jpg'
 	#filename = '/home/yves/Pictures/rubik/2017-02-26-124830.jpg'
+    # filename = '/home/yves/Pictures/rubik/2017-03-12-163532.jpg'
 	analyse_file( filename)
 	cv::wait_key(-1)
 
 else
-	track_webcam( )
+    init_ui
+
+    # @selected = 0
+    @colors   = {}
+    # @center_pixels = []
+
+    # get camera as last video device
+    video_dev = Dir.glob( "/dev/video*")
+    cam = video_dev.map { |p| /(\d+)$/ =~ p
+                            $1.to_i }
+                    .sort
+                    .last
+
+    puts "using camera #{cam}"
+
+	track_webcam( cam) do |tracker, key_press|
+        puts "#{tracker.good?} - detected #{tracker.detected} - undetectednum #{tracker.undetectednum}"
+        action = input_key2action key_press
+
+        if tracker.good?
+            # pp tracker
+            puts cube_to_s( tracker.colors)
+
+            case action
+            when :store_face
+                puts "save face #{key_press.chr}"
+                @colors[ key_press.chr] = tracker.colors
+            end
+
+            # @center_pixels[ @selected] = tracker.center_pixels
+
+            good!( tracker)
+
+            # inc faces
+            #@selected = [ @selected + 1, 5].min
+        end
+
+    end
 end
 
+end # __FILE__ == $0
