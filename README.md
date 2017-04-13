@@ -2,7 +2,7 @@
 
 Base on Andrej Karpathy python code and article.
 Big thank to him for sharing his work.
-![d8bd46a7.png]({{site.baseurl}}/d8bd46a7.png)
+![d8bd46a7.png]({{site.baseurl}}d8bd46a7.png)
 
 
 I move some (not all) part of initial script to ruby.
