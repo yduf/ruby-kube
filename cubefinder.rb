@@ -1123,8 +1123,12 @@ def track_webcam( cam = 0)
 		tracker = rubik.analyze_frame( frame, tracker)
 
 		key_press = cv::wait_key( 1)
+        action = input_key2action key_press, frame
 
-        yield tracker, key_press if block_given?
+        action = handle_top_action( action, frame)
+
+        # forward info
+        yield tracker, action if block_given?
 	end
 end
 
@@ -1149,29 +1153,59 @@ end
 # main test
 if __FILE__ == $0
 
-def input_key2action( key_press )
-    case key_press.ch
-    # reset search
-    when 'a'
-        :reset
-    # save image
-    when 's'
-        :save_frame
+def input_key2action( key_press, frame )
+    puts "input_key2action #{key_press}"
+    case key_press.chr
+    
+    when 'a'                # reset search
+        { reset: {} }
+
+    when 'c'                # save detected color
+        { save_color: {} }
+
+    when 's'                # save frame
+        puts "save image"
+
+        $frame_counter  = ( $frame_counter ||= 0 ) + 1
+        { save_frame: { frame: frame,
+                      file_name: "frame_#{$frame_counter}.jpg" }
+        }
     # store rgb snap for given face
     when 'u', 'l', 'f', 'r', 'b', 'd'
         puts "save face #{key_press.chr}"
-        :store_face
+        { store_face: { face: key_press.chr } }
         # @colors[ key_press.chr] = tracker.colors
+
     # resolve color attributuion for whole cube
     when 'p'
         puts "resolve whole faces color"
-        :resolve_color
+        { resolve_color: {} }
+
     else
-        :none
+        {}
     end
-rescue
-    :none
+
+rescue      # invalid key
+    {}
 end
+
+def handle_top_action( action, frame)
+    # jandle general action internally
+    drop_action = true
+
+    case action.keys.first
+    when :save_frame
+        params = action.values.first
+        cv::imwrite( params[:file_name], params[:frame])      
+
+    else
+        drop_action = false
+    end
+
+    action = {} if drop_action
+    action
+end
+
 
 if false
 	# file mode
@@ -1197,18 +1231,23 @@ else
 
     puts "using camera #{cam}"
 
-	track_webcam( cam) do |tracker, key_press|
+	track_webcam( cam) do |tracker, action|
         puts "#{tracker.good?} - detected #{tracker.detected} - undetectednum #{tracker.undetectednum}"
-        action = input_key2action key_press
 
         if tracker.good?
             # pp tracker
             puts cube_to_s( tracker.colors)
 
-            case action
+            case action.keys.first
+            when :save_color
+                puts "save color"
+                IO.write( "./colors.txt", "#{tracker.colors}\n", mode: 'a')
+
             when :store_face
                 puts "save face #{key_press.chr}"
                 @colors[ key_press.chr] = tracker.colors
+
+                puts @colors.to_s
             end
 
             # @center_pixels[ @selected] = tracker.center_pixels

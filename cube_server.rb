@@ -15,7 +15,8 @@ class CubeStatus
 	end
 
 	# take a snapshot of cube status detection
-	def snap_status!( s)
+	# return any pending action
+	def set_status!( s)
 		@s = s
 	end
 
@@ -46,7 +47,7 @@ require_relative 'cubefinder.rb'
 Thread.new do 
 	init_ui
 	track_webcam( cam = 0) { |tracker,key_press|
-		$cube.set_status tracker
+		action = $cube.set_status tracker
 	}
 end
 

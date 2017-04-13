@@ -1,0 +1,11 @@
+TODO
+
+1 - check into github
+2 - save multiple faces
+	- build a dataset for testing
+3 - recognize color along faces
+	0 - have a dataset for testing
+	a - take center
+	b - take faces that look like center
+	c - deduce situation in faces format (not color)
+	d - display in color base upon center color
