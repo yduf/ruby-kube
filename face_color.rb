@@ -424,7 +424,11 @@ cube[:match].each { |f,i,j,ci,c, compact|
 centers.each  { |c,hsv,i,j| 
 				final[i] << [c,i,j,i,c] }
 
-
+#
+by_face_number =  final.map { |a| 
+						a.sort_by { |f,i,j,ci,c| j }
+						  .map    { |f,i,j,ci,c| ci }
+						}
 
 puts "with centers colors"
 new_faces = final.map { |a| 
@@ -438,10 +442,7 @@ new_faces = final.map { |a|
 puts concat_2d( new_faces, "  " )
 
 # express as face number
-digit = final.map { |a| 
-						a.sort_by { |f,i,j,ci,c| j }
-						  .map    { |f,i,j,ci,c| ci }
-						}
+digit = by_face_number
 
 puts "expected:"
 e_digit = $expected.map { |a| 
@@ -474,3 +475,14 @@ c_digit = testc.map { |a|
 					        .join("\n")
 						}
 puts concat_2d( c_digit, "   " )
+
+# convert digit to kocimba
+def kocimba( digit)
+	k = [ 'L', 'F', 'R', 'B', 'U', 'D']
+	s = digit.flatten
+			 .map { |d| k[d]}.join("")
+end
+
+puts "kocimba"
+puts kocimba( digit)
+
