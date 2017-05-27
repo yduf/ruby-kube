@@ -12,6 +12,20 @@ The port only cover detection and still has some bug.
 I try to split the code to have cleaner  dependencies between
 parts.
 
+# Install
+
+this miss a bundler config
+gem used: 
+ropencv
+
+# installing opencv
+
+ropencv need version 2.4 of opencv
+need to have library in path
+
+then:
+gem install ropencv
+
 ### TODO:
 
 - fix detection code matched_0

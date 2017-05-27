@@ -31,7 +31,7 @@ def intersect_seg(x1, x2, x3, x4, y1, y2, y3, y4)
 end
 
 # return the pts in correct order based on quadrants
-def winded(p1, p2, p3, p4)
+def winded( p1, p2, p3, p4)
     avg = [ 0.25 * (p1[0] + p2[0] + p3[0] + p4[0]), 
     		0.25 * (p1[1] + p2[1] + p3[1] + p4[1])]
     ps = [p1, p2, p3, p4].map { |p| [ Math::atan2(p[1] - avg[1], p[0] - avg[0]), p] }
@@ -110,13 +110,136 @@ def to_color( grey)
     rgb
 end
 
+
+# convert array representing poing
+# to something usable with opencv mat
+def to_mat( p)
+    pt = cv::Mat.new( 3, 1, cv::CV_64FC1)
+    pt[0,0] = p[0] 
+    pt[1,0] = p[1]
+    pt[2,0] = 1
+
+    pt
+end
+
+# What we call a cube is really a "square" correspondign to a face
+# it is define by 3 points
+#  p0 -- p1
+#   |
+#  p2
+##
+class Cube < Array
+    def initialize( a = [ [0, 0], [1, 0], [0, 1]])  
+        super( a)
+    end
+
+    def p
+        self[0]
+    end
+
+    def p1
+        self[1]
+    end
+
+    def p2 
+        self[2]
+    end
+
+    # p2 + pp1
+    def p3
+        [ p2[0] + p1[0] - p[0], p2[1] + p1[1] - p[1] ]
+    end
+
+    # return size of a facet
+    def radius
+        rad = ptdst( p1, p ) / 6.0
+    end
+
+    # return new Cube, with corresponding coordinate
+    def moveTo( x, y)
+        Cube.new( self.map { |p| [ p[0] + x, p[1] + y] } )
+    end
+
+    #
+    def resize( s)
+        Cube.new( self.map { |p| [ p[0]*s, p[1]*s] } )
+    end
+
+    # rotate around [0,0]
+    def rotate( degree)
+        c = self.center
+        rot = cv::getRotationMatrix2D( cv::Point2f.new( c[0], c[1]), degree, scale = 1.0)
+
+        Cube.new( self.map { |p|
+                              r = rot * to_mat( p)
+                              r.to_a.flatten
+                            })
+    end
+
+    # return array of point expected by other method
+    def to_a
+        [ p, p1, p2, p3]
+    end
+
+
+    # return center of 4 corner
+    def center
+        avg = [ 0.25 * (p1[0] + p2[0] + p3[0] + p[0]), 
+                0.25 * (p1[1] + p2[1] + p3[1] + p[1])]
+    end
+
+    # return the pts in correct order based on quadrants
+    def clockwise
+        avg = center
+        ps = self.to_a.map { |p| [ Math::atan2(p[1] - avg[1], p[0] - avg[0]), p] }
+        ps.sort!.reverse!
+
+        ps.map { |p| p[1] }
+    end
+
+    # get the coordinates of center of the 9 facet
+    def facets
+        pt = clockwise
+
+        v1 = [ pt[1][0] - pt[0][0], pt[1][1] - pt[0][1] ]
+        v2 = [ pt[3][0] - pt[0][0], pt[3][1] - pt[0][1] ]
+        p0 = [ pt[0][0],  pt[0][1]]
+
+        ep = []         # extraction point
+        i = 1
+        j = 5
+        for k in 0..8
+            ep << [ p0[0] + i * v1[0] / 6.0 + j * v2[0] / 6.0,
+                    p0[1] + i * v1[1] / 6.0 + j * v2[1] / 6.0]
+            i = i + 2
+            if i == 7
+                i = 1
+                j = j - 2
+            end
+        end
+
+        ep
+    end
+
+end # class Cube
+
 # detect cube according to XXX
 class RubikFinder
 	DECTS = 100						# ideal number of lines detections
 
     attr_reader :tracker            # get current tracker state
 
+    class Manual
+        attr_accessor   :activated,     
+                        :xCenter,       # in pixels
+                        :yCenter,       # in pixels
+                        :rotation,      # in degree
+                        :size           # in pixels
+    end
+
 	class Tracking
+        attr_accessor   :manual             # cube postion / manual setting
+
 		attr_accessor 	:prevface,
 						:pt,
 						:lastpt,
@@ -145,7 +268,7 @@ class RubikFinder
 		def initialize( )			
 	        # stores the coordinates that make up the face. in order: p,p1,p3,p2 (i.e.) counterclockwise winding
 	        @prevface = [ [0, 0], [5, 0], [0, 5]]
-	        # @prevface = [[349.0, 46.0], [531, 52], [340, 237]]
+
 	        @pt     = []
 	        @lastpt = []
 
@@ -158,6 +281,9 @@ class RubikFinder
             # hough parameter
             @minLineLength = 30 
             @maxLineGap    = 12
+
+            # for manual fallback
+            @manual = Manual.new
 	    end
 
         # tell if cube was detected and current face is analyzed
@@ -212,7 +338,10 @@ class RubikFinder
         # this could be move in dectect function, but we use it for display
         @dst2 = laplacian( @grey)       
         @lap  = to_color( @dst2)         # convert back to color for display
-                  
+             
+        puts "manual #{@tracker.manual.activated}"     
+        if !@tracker.manual.activated        # auto or manual mode
+
         # if was tracking contine tracking on current frame
         # this work if tracking was initialized
         if @tracker.tracking
@@ -254,6 +383,32 @@ class RubikFinder
             # this init tracker
 	        @tracker = draw_circles_and_lines( @tracker, extract = true)
 	    end
+
+
+        else # manual mode
+            man = Cube.new.resize( @tracker.manual.size)
+                          .rotate( @tracker.manual.rotation)
+                          .moveTo( @tracker.manual.xCenter,
+                                   @tracker.manual.yCenter )
+
+            rad = man.radius
+            cs = colors_for( @sgc, man.facets, rad )
+
+            drawX( *man.to_a)
+
+            man.facets.zip( cs).each { |p, rgb|
+                r, g, b = rgb
+                col = [b, g, r]
+                #puts "#{p}, #{rgb}"
+                cvCircle( @sg, p, rad, col, -1)
+                cvCircle( @sg, p, rad, [255, 255, 255], 2)
+            }
+
+            @tracker.colors        = cs
+            @tracker.center_pixels = man.facets
+            @tracker.detected      = true
+            @tracker.tracking      = true
+        end
 
         # display images, with content
 	    cv::imshow("lines", @lap)
@@ -307,6 +462,32 @@ class RubikFinder
         [ ep, tracker]
     end
 
+    # extract avg colors at selected position
+    def colors_for( frame, points, radius)
+        cs = []
+
+        rad = radius
+        den = 1
+        width, height = [ frame.size.width, frame.size.height]
+
+        points.each { |p|
+            # puts i
+            if p[0] > rad && p[0] < width  - rad &&
+               p[1] > rad && p[1] < height - rad
+
+                roi = [ (p[0] - rad / den), (p[1] - rad / den)], 
+                      [ (p[0] + rad / den), (p[1] + rad / den)]
+                b,g,r = cvAvg( frame, roi).to_a                        # extract colors 
+
+                cs << [ r, g, b]           # rgb color
+            else
+                cs << [ 0, 0, 0]           # rgb color
+            end
+        }
+
+        cs
+    end
+
     def extract_color( tracker, extract)
         cs = []
         center_pixels = []
@@ -329,6 +510,10 @@ class RubikFinder
                       [ (p[0] + rad / den), (p[1] + rad / den)]
                 col = cvAvg( @sgc, roi).to_a
 
+                # extract colors 
+                b,g,r = col
+                cs << [ r, g, b]           # rgb color
+
                 # p_int = [ p[0], p[1] ]
                 # puts "Circle #{p_int}-#{rad}  #{[ col[0], col[1], col[2]] }"
                 cvCircle( @sg, p, rad, [ col[0], col[1], col[2]], -1)
@@ -338,10 +523,6 @@ class RubikFinder
                 else
                     cvCircle( @sg, p, rad, [255, 255, 255], 2)
                 end
-
-                # extract face 
-                b,g,r = col
-                cs << [ r, g, b]           # rgb color
 
                 if extract
                     center_pixels << [p[0] * den, p[1] * den] # pixel coordinate in frame
@@ -457,7 +638,7 @@ class RubikFinder
                        kernel_size = 1, scale = 1, delta = 0 )
 
         # cv.CmpS(self.d, 8, self.d2, cv.CV_CMP_GT)
-        cmp = cv::Mat.new [ threshold = 4] 
+        cmp = cv::Mat.new  [ threshold = 4] 
         cv::compare( out, cmp, out, CV_CMP_GT)
  
         # if false # self.onlyBlackCubes:
@@ -1104,20 +1285,35 @@ def track_webcam( cam = 0)
     video_file.read( frame)
     puts [ frame.size.width, frame.size.height].to_s
 
+
     # continuous 
     tracker = rubik.tracker
     cv::setTrackbarPos( "minLineLength", "LLines", tracker.minLineLength)
-    cv::setTrackbarPos( "maxLineGap", "LLines", tracker.maxLineGap)
+    cv::setTrackbarPos( "maxLineGap",    "LLines", tracker.maxLineGap)
 
+    # inti value for manual detection
+    cv::setTrackbarPos( "activated", "Manual",  0)
+    cv::setTrackbarPos( "xCenter", "Manual",  frame.size.width / 2)
+    cv::setTrackbarPos( "yCenter", "Manual",  frame.size.height / 2)
+    cv::setTrackbarPos( "rotation","Manual", 0)
+    cv::setTrackbarPos( "size",    "Manual",  frame.size.height / 3)
+  
 	while true do
 		video_file.read( frame)
         
         # manipulate state 
         if tracker
             tracker.minLineLength = cv::getTrackbarPos( "minLineLength", "LLines")
-            tracker.maxLineGap = cv::getTrackbarPos( "maxLineGap", "LLines")
+            tracker.maxLineGap    = cv::getTrackbarPos( "maxLineGap",    "LLines")
 
             # tracker.tracking = false        # force detect mode always
+
+            manual = tracker.manual
+            manual.activated = cv::getTrackbarPos( "activated", "Manual") == 1
+            manual.xCenter = cv::getTrackbarPos( "xCenter", "Manual")
+            manual.yCenter = cv::getTrackbarPos( "yCenter", "Manual")
+            manual.rotation = cv::getTrackbarPos( "rotation", "Manual")
+            manual.size    = cv::getTrackbarPos( "size", "Manual")            
         end
 
 		tracker = rubik.analyze_frame( frame, tracker)
@@ -1147,7 +1343,15 @@ def init_ui()
     # att UI for threshold
     cv::namedWindow("LLines", 1);
     cvCreateTrackbar( "minLineLength", "LLines", valuep = nil, count = 200, onChange=nil)
-    cvCreateTrackbar( "maxLineGap", "LLines", valuep = nil, count = 200, onChange=nil)
+    cvCreateTrackbar( "maxLineGap",    "LLines", valuep = nil, count = 200, onChange=nil)
+
+    # this will be used for manual selection of colors
+    cv::namedWindow("Manual", 1);
+    cvCreateTrackbar( "activated", "Manual", valuep = nil, count = 1, onChange=nil)
+    cvCreateTrackbar( "xCenter", "Manual", valuep = nil, count = 1000, onChange=nil)
+    cvCreateTrackbar( "yCenter", "Manual", valuep = nil, count = 1000, onChange=nil)
+    cvCreateTrackbar( "rotation","Manual", valuep = nil, count = 400, onChange=nil)
+    cvCreateTrackbar( "size",    "Manual", valuep = nil, count = 1000, onChange=nil)
 end
 
 # main test
@@ -1206,6 +1410,14 @@ def handle_top_action( action, frame)
     action
 end
 
+# get camera as last video device
+def find_cam()
+    video_dev = Dir.glob( "/dev/video*")
+    cam = video_dev.map { |p| /(\d+)$/ =~ p
+                            $1.to_i }
+                    .sort
+                    .last
+end
 
 if false
 	# file mode
@@ -1222,13 +1434,7 @@ else
     @colors   = {}
     # @center_pixels = []
 
-    # get camera as last video device
-    video_dev = Dir.glob( "/dev/video*")
-    cam = video_dev.map { |p| /(\d+)$/ =~ p
-                            $1.to_i }
-                    .sort
-                    .last
-
+    cam = find_cam
     puts "using camera #{cam}"
 
 	track_webcam( cam) do |tracker, action|

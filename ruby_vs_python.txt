@@ -1,0 +1,6 @@
+python 
+for j, f in enumerate(toloop):
+	...
+
+ruby 
+toloop.each_with_index { |j,f| ... }
