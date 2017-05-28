@@ -483,6 +483,6 @@ def kocimba( digit)
 			 .map { |d| k[d]}.join("")
 end
 
-puts "kocimba"
-puts kocimba( digit)
+puts "kociemba"
+puts kociemba( digit)
 
